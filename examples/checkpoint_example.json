@@ -1,0 +1,97 @@
+{
+  "timestamp": "2026-01-04T23:22:18.566712",
+  "config": {
+    "source_dir": "/home/user/docs/qsys-lua",
+    "output_dir": "/home/user/ai/knowledge-base/qsys-full-extract",
+    "collection_name": "qsys-lua-v3",
+    "chunk_size": 3000,
+    "chunk_overlap": 200,
+    "models": ["llama3.1:8b", "qwen2.5:7b", "mistral:latest"],
+    "relationship_model": "qwen3"
+  },
+  "stats": {
+    "chunks": 3427,
+    "documents": 690,
+    "entities": 8484,
+    "relationships": 6038
+  },
+  "entities": [
+    {
+      "name": "Timer",
+      "type": "COMPONENT",
+      "confidence": 0.92,
+      "source_chunk": "2c917f9a6856...",
+      "extraction_model": "llama3.1:8b,qwen2.5:7b",
+      "source_validated": true,
+      "type_inferred": false,
+      "relationships": []
+    },
+    {
+      "name": "Timer.Start",
+      "type": "METHOD",
+      "confidence": 0.85,
+      "source_chunk": "2c917f9a6856...",
+      "extraction_model": "llama3.1:8b,qwen2.5:7b,mistral:latest",
+      "source_validated": true,
+      "type_inferred": false,
+      "relationships": [
+        {
+          "source": "Timer.Start",
+          "target": "Timer",
+          "type": "BELONGS_TO",
+          "confidence": 0.95
+        }
+      ]
+    },
+    {
+      "name": "Control",
+      "type": "COMPONENT",
+      "confidence": 0.78,
+      "source_chunk": "3d823b0c7967...",
+      "extraction_model": "qwen2.5:7b",
+      "source_validated": true,
+      "type_inferred": true,
+      "relationships": []
+    },
+    {
+      "name": "Control.Value",
+      "type": "PROPERTY",
+      "confidence": 0.91,
+      "source_chunk": "4e934c1d8078...",
+      "extraction_model": "mistral:latest",
+      "source_validated": true,
+      "type_inferred": false,
+      "relationships": [
+        {
+          "source": "Control.Value",
+          "target": "Control",
+          "type": "BELONGS_TO",
+          "confidence": 0.90
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "source": "Timer.Start",
+      "target": "Timer",
+      "type": "BELONGS_TO",
+      "confidence": 0.95,
+      "extraction_model": "qwen3"
+    },
+    {
+      "source": "Control.Value",
+      "target": "Control",
+      "type": "BELONGS_TO",
+      "confidence": 0.90,
+      "extraction_model": "qwen3"
+    },
+    {
+      "source": "Timer",
+      "target": "Control",
+      "type": "CONNECTS_TO",
+      "confidence": 0.82,
+      "extraction_model": "qwen3"
+    }
+  ]
+}

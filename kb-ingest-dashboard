@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+"""
+KB Ingest Dashboard v1.0 - Real-time monitoring for knowledge base ingestion
+Tracks ingestion progress, entity extraction, LLM API calls, and token usage
+
+Usage:
+    kb-ingest-dashboard        # Show logs (default)
+    kb-ingest-dashboard --hide-logs  # Hide log panel
+"""
+
+import json
+import re
+import sys
+import time
+import psutil
+from pathlib import Path
+from datetime import datetime
+from collections import deque
+
+try:
+    from rich.console import Console
+    from rich.live import Live
+    from rich.layout import Layout
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from rich import box
+except ImportError:
+    print("Installing required packages...")
+    import subprocess
+    subprocess.run(["pip", "install", "rich", "psutil"], check=True)
+    from rich.console import Console
+    from rich.live import Live
+    from rich.layout import Layout
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from rich import box
+
+
+class KBIngestDashboard:
+    """Real-time dashboard for KB ingestion monitoring"""
+
+    def __init__(self, show_logs: bool = True):
+        self.console = Console()
+        self.base_dir = Path.home() / "ai" / "knowledge-base"
+        self.output_dir = self.base_dir / "qsys-full-extract"
+        self.log_file = None
+        self.show_logs = show_logs
+        self.log_lines = deque(maxlen=30)
+        self.last_chunk = 0
+        self.total_chunks = 0
+        self.entities = 0
+        self.relationships = 0
+        self.start_time = None
+        self.pid = None
+        self.model_calls = {}
+        self._find_latest_log()
+
+    def _find_latest_log(self):
+        """Find the most recent log file (pipeline.log or run_*.log)"""
+        # Check pipeline.log first (current ingestion)
+        pipeline_log = self.output_dir / "pipeline.log"
+        if pipeline_log.exists():
+            self.log_file = pipeline_log
+            return
+
+        # Fall back to run_*.log files
+        run_logs = sorted(self.output_dir.glob("run_*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if run_logs:
+            self.log_file = run_logs[0]
+
+    def _get_start_time_from_log(self):
+        """Get actual ingestion start time from first log entry (deprecated - use session_start)"""
+        if not self.log_file or not self.log_file.exists():
+            return None
+
+        try:
+            with open(self.log_file, 'r') as f:
+                for line in f:
+                    # Log format: [2026-01-04 22:03:53] ...
+                    match = re.search(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
+                    if match:
+                        return datetime.fromisoformat(match.group(1))
+        except Exception:
+            pass
+        return None
+
+    def _get_session_start_from_log(self):
+        """Get current session start time by finding the latest pipeline start marker.
+        Session markers are lines with many '=' characters or 'PIPELINE' keywords.
+        """
+        if not self.log_file or not self.log_file.exists():
+            return None
+
+        try:
+            with open(self.log_file, 'r') as f:
+                lines = f.readlines()
+
+            # Find all session markers with their timestamps
+            session_starts = []
+            for line in lines:
+                # Session markers: lines with "====" or "PIPELINE" start
+                if '=====' in line or ('PIPELINE' in line and 'v3' in line):
+                    match = re.search(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
+                    if match:
+                        session_starts.append(datetime.fromisoformat(match.group(1)))
+
+            # Return the MOST RECENT session start (current session)
+            if session_starts:
+                return session_starts[-1]
+
+            # Fallback: first timestamp if no markers found
+            for line in lines:
+                match = re.search(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
+                if match:
+                    return datetime.fromisoformat(match.group(1))
+
+        except Exception:
+            pass
+        return None
+
+    @property
+    def session_start(self):
+        """Cached session start time"""
+        if not hasattr(self, '_session_start_cached'):
+            self._session_start_cached = self._get_session_start_from_log()
+        return self._session_start_cached
+
+    def _find_process(self):
+        """Find the running ingestion process"""
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                cmdline = proc.info['cmdline']
+                if cmdline and any('kb_ingest_v3.py' in str(c) for c in cmdline):
+                    self.pid = proc.info['pid']
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return False
+
+    def _parse_checkpoint(self, checkpoint_path):
+        """Parse checkpoint file for stats. Returns None if checkpoint is from before current session."""
+        try:
+            with open(checkpoint_path, 'r') as f:
+                data = json.load(f)
+            stats = data.get('stats', {})
+            entities = data.get('entities', [])
+
+            # Check if this checkpoint belongs to current session
+            checkpoint_ts_str = data.get('timestamp', '')
+            if checkpoint_ts_str and self.session_start:
+                try:
+                    checkpoint_ts = datetime.fromisoformat(checkpoint_ts_str)
+                    # Skip checkpoints from before current session
+                    if checkpoint_ts < self.session_start:
+                        return None
+                except (ValueError, TypeError):
+                    pass  # If we can't parse timestamp, include it anyway
+
+            # Count model usage (split ensemble names like "llama3.1:8b,qwen2.5:7b")
+            model_usage = {}
+            for ent in entities:
+                model_str = ent.get('extraction_model', 'unknown')
+                for model in [m.strip() for m in model_str.split(',')]:
+                    if model:  # Skip empty strings
+                        model_usage[model] = model_usage.get(model, 0) + 1
+
+            # Extract chunk number from filename (checkpoint_50.json -> 50)
+            match = re.search(r'checkpoint_(\d+)\.json', str(checkpoint_path))
+            processed_chunks = int(match.group(1)) if match else 0
+
+            return {
+                'chunk': processed_chunks,
+                'total_chunks': stats.get('chunks', 0),
+                'entities': len(entities),
+                'relationships': len(data.get('relationships', [])),
+                'timestamp': checkpoint_ts_str,
+                'model_usage': model_usage,
+            }
+        except Exception:
+            return None
+
+    def _get_latest_checkpoint(self):
+        """Get stats from the latest checkpoint that belongs to current session."""
+        checkpoints = sorted(self.output_dir.glob("checkpoint_*.json"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+
+        # Find the first checkpoint that belongs to current session
+        for checkpoint in checkpoints:
+            stats = self._parse_checkpoint(checkpoint)
+            if stats:  # Will be None if checkpoint is from before session start
+                return stats
+
+        return None  # No valid checkpoints for current session
+
+    def _read_logs(self):
+        """Read new log lines - only from current session"""
+        self._find_latest_log()
+        if not self.log_file or not self.log_file.exists():
+            return
+
+        try:
+            with open(self.log_file, 'r') as f:
+                all_lines = f.readlines()
+
+            # Clear and rebuild to always show latest
+            self.log_lines.clear()
+
+            # Find where current session starts
+            session_start_idx = 0
+            if self.session_start:
+                for i, line in enumerate(all_lines):
+                    if '=====' in line or ('PIPELINE' in line and 'v3' in line):
+                        match = re.search(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
+                        if match:
+                            try:
+                                line_ts = datetime.fromisoformat(match.group(1))
+                                if line_ts >= self.session_start:
+                                    session_start_idx = i
+                            except (ValueError, TypeError):
+                                pass
+
+            # Only read lines from current session
+            for line in all_lines[session_start_idx:]:  # Check latest entries
+                stripped = line.strip()
+                if not stripped:
+                    continue
+
+                # Include relationships, chunk progress, extraction results
+                if any(kw in stripped for kw in ['Chunk', 'Extracted', 'Found', 'relationships',
+                                                   'PIPELINE', 'QUALITY', 'Created', 'Starting']):
+                    self.log_lines.append(stripped)
+        except Exception:
+            pass
+
+    def _update_stats(self):
+        """Update dashboard statistics"""
+        checkpoint = self._get_latest_checkpoint()
+        if checkpoint:
+            self.last_chunk = checkpoint['chunk']
+            self.entities = checkpoint['entities']
+            self.relationships = checkpoint['relationships']
+            self.model_calls = checkpoint.get('model_usage', {})
+
+            if checkpoint.get('total_chunks'):
+                self.total_chunks = checkpoint['total_chunks']
+
+        # Get actual start time from log (not checkpoint timestamp!)
+        # Use session_start to only track current session
+        if not self.start_time:
+            self.start_time = self.session_start
+
+    def _make_mini_bar(self, pct, color, width=10):
+        """Create a mini progress bar"""
+        filled = int(width * pct / 100)
+        filled_part = "█" * filled
+        empty_part = "░" * (width - filled)
+        # Only add markup if there's content
+        bar = ""
+        if filled_part:
+            bar += f"[{color}]{filled_part}[/{color}]"
+        if empty_part:
+            bar += f"[dim]{empty_part}[/dim]"
+        return bar if bar else "░" * width
+
+    def _build_progress_panel(self):
+        """Build large progress bar panel"""
+        pct = (self.last_chunk / max(self.total_chunks, 1)) * 100
+
+        if pct < 25:
+            color, label = "red", "Starting"
+        elif pct < 50:
+            color, label = "yellow", "In Progress"
+        elif pct < 75:
+            color, label = "green", "Good Progress"
+        else:
+            color, label = "bright_green", "Almost Done"
+
+        bar_width = 60
+        filled = int(bar_width * pct / 100)
+
+        text = Text()
+        text.append(f"{self.last_chunk:,}/{self.total_chunks:,} chunks  ", style=f"bold {color}")
+        text.append(f"({pct:.1f}%)", style="dim")
+        text.append("\n\n")
+        text.append("█" * filled, style=f"bold {color}")
+        text.append("░" * (bar_width - filled), style="dim")
+
+        return Panel(text, title=f"[bold]{label}[/bold]", border_style=color, box=box.ROUNDED)
+
+    def _build_status_panel(self):
+        """Build status panel with all metrics"""
+        is_running = self._find_process()
+
+        status = "[green bold]RUNNING[/green bold]" if is_running else "[red bold]STOPPED[/red bold]"
+
+        grid = Table.grid(padding=0, expand=True)
+        grid.add_column(justify="left", style="cyan")
+        grid.add_column(justify="right", style="yellow")
+
+        elapsed = "N/A"
+        if self.start_time:
+            elapsed_total = int((datetime.now() - self.start_time).total_seconds())
+            hours = elapsed_total // 3600
+            minutes = (elapsed_total % 3600) // 60
+            elapsed = f"{hours}h {minutes}m"
+
+        eta, pct = self._calculate_eta(self.last_chunk, self.total_chunks,
+                                      (datetime.now() - self.start_time).total_seconds() if self.start_time else 0)
+
+        if self.start_time and self.last_chunk > 0:
+            elapsed_total = int((datetime.now() - self.start_time).total_seconds())
+            rate = int((self.last_chunk / elapsed_total) * 3600)
+        else:
+            rate = 0
+
+        est_llm_calls = self.last_chunk * 4
+        est_tokens = est_llm_calls * 750  # Updated estimate based on avg chunk size
+
+        avg_entities = self.entities / self.last_chunk if self.last_chunk > 0 else 0
+        avg_rels = self.relationships / self.last_chunk if self.last_chunk > 0 else 0
+
+        grid.add_row("Status:", status)
+        grid.add_row("")
+        grid.add_row("Progress:", f"[bold]{self.last_chunk:,}/{self.total_chunks:,}[/bold] ([cyan]{pct:.1f}%[/cyan])")
+        grid.add_row("Elapsed:", elapsed)
+        grid.add_row("ETA:", eta)
+        grid.add_row("Rate:", f"[green]{rate:,}[/green] chunks/hr")
+        grid.add_row("")
+        grid.add_row("Entities:", f"[cyan]{self.entities:,}[/cyan] ({avg_entities:.1f}/chunk)")
+        grid.add_row("Relationships:", f"[magenta]{self.relationships:,}[/magenta] ({avg_rels:.1f}/chunk)")
+        grid.add_row("")
+        grid.add_row("Est. LLM Calls/Model:", f"[yellow]{est_llm_calls:,}[/yellow]")
+        grid.add_row("Est. Tokens/Model:", f"[yellow]{est_tokens:,}[/yellow]")
+
+        return Panel(grid, title="[bold]Ingestion Status[/bold]", border_style="bright_blue", box=box.ROUNDED)
+
+    def _calculate_eta(self, current, total, elapsed_seconds):
+        """Calculate ETA based on progress"""
+        if current == 0 or total == 0:
+            return "Unknown", 0
+
+        rate = elapsed_seconds / current
+        remaining = total - current
+        eta_seconds = remaining * rate
+        eta_seconds = max(0, eta_seconds)
+        pct = (current / total) * 100
+
+        if eta_seconds < 60:
+            return f"{int(eta_seconds)}s", pct
+        elif eta_seconds < 3600:
+            mins = int(eta_seconds / 60)
+            secs = int(eta_seconds % 60)
+            return f"{mins}m {secs}s", pct
+        else:
+            hours = int(eta_seconds / 3600)
+            mins = int((eta_seconds % 3600) / 60)
+            return f"{hours}h {mins}m", pct
+
+    def _build_model_panel(self):
+        """Build LLM usage panel - actual model usage from checkpoint data"""
+        table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE)
+        table.add_column("Model", style="cyan")  # No width limit - takes remaining space
+        table.add_column("Entities", justify="right", style="green", width=7)
+        table.add_column("Est. LLM Calls", justify="right", style="yellow", width=9)
+        table.add_column("Est. Tokens", justify="right", style="yellow", width=11)
+
+        # Get actual model usage from checkpoint data
+        # self.model_calls is {model_name: entity_count}
+        model_usage = self.model_calls if self.model_calls else {}
+
+        # Token estimate: ~750 tokens per call based on avg chunk size (~3000 chars / 4)
+        tokens_per_call = 750
+
+        if model_usage:
+            # Sort by entity count (descending)
+            for model, count in sorted(model_usage.items(), key=lambda x: x[1], reverse=True):
+                # Estimate calls: each chunk has one call per model
+                est_calls = self.last_chunk  # One call per chunk for this model
+                est_tokens = est_calls * tokens_per_call
+                table.add_row(model, f"{count:,}", f"{est_calls:,}", f"{est_tokens:,}")
+        else:
+            # No checkpoint data yet - show all models (fallback)
+            extraction_calls = self.last_chunk
+            for model_name in ["llama3.1:8b", "qwen2.5:7b", "mistral:latest"]:
+                est_tokens = extraction_calls * tokens_per_call
+                table.add_row(model_name, "0", f"{extraction_calls:,}", f"{est_tokens:,}")
+            # Add qwen3 for relationships
+            rel_tokens = extraction_calls * tokens_per_call
+            table.add_row("qwen3", "0", f"{extraction_calls:,}", f"{rel_tokens:,}")
+
+        return Panel(table, title="[bold]LLM Usage (est. 750 tok/call)[/bold]", border_style="magenta", box=box.ROUNDED)
+
+    def _build_system_panel(self):
+        """Build system resource panel"""
+        grid = Table.grid(padding=0)
+        grid.add_column(justify="right", style="cyan")  # Right-align labels
+        grid.add_column("", width=2)  # Spacer column for gap
+        grid.add_column(justify="left", style="yellow")   # Left-align bars after labels
+
+        cpu = psutil.cpu_percent(interval=0.1)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage(str(self.output_dir))
+
+        grid.add_row("CPU:", "", f"{self._make_mini_bar(cpu, 'blue')} {cpu:.0f}%")
+        grid.add_row("Memory:", "", f"{self._make_mini_bar(mem.percent, 'green')} {mem.used / (1024**3):.1f}GB ({mem.percent:.0f}%)")
+        grid.add_row("Disk:", "", f"{self._make_mini_bar(disk.percent, 'yellow')} {disk.used / (1024**3):.0f}GB used")
+
+        return Panel(grid, title="[bold]System Resources[/bold]", border_style="bright_cyan", box=box.ROUNDED)
+
+    def _build_log_panel(self):
+        """Build log panel (at bottom, less prominent)"""
+        if not self.show_logs:
+            return Panel(
+                Text("Logs hidden. Restart without --hide-logs to show.", style="dim"),
+                title="[bold]Logs[/bold]",
+                border_style="dim",
+                box=box.ROUNDED
+            )
+
+        self._read_logs()
+        logs = list(self.log_lines)[-20:]
+
+        if not logs:
+            msg = Text("Waiting for log entries...", style="dim")
+            return Panel(msg, title="[bold]Logs[/bold]", border_style="bright_cyan", box=box.ROUNDED)
+
+        log_text = Text()
+        for line in logs:
+            if 'Chunk' in line and '/' in line:
+                log_text.append(line + "\n", style="cyan")
+            elif 'Extracted' in line:
+                log_text.append(line + "\n", style="green")
+            elif 'Found' in line and 'relationships' in line:
+                log_text.append(line + "\n", style="magenta")
+            else:
+                log_text.append(line + "\n", style="dim")
+
+        return Panel(log_text, title="[bold]Logs (last 20)[/bold]", border_style="bright_cyan", box=box.ROUNDED)
+
+    def _build_info_panel(self):
+        """Build info panel"""
+        info = Table.grid(padding=0)
+        info.add_column(style="dim")
+
+        info.add_row(f"Output: {self.output_dir}")
+        if self.log_file:
+            info.add_row(f"Log: {self.log_file.name}")
+        info.add_row("")
+        info.add_row("Press Ctrl+C to quit")
+
+        return Panel(info, title="[bold]Info[/bold]", border_style="bright_yellow", box=box.ROUNDED)
+
+    def _build_layout(self):
+        """Build dashboard layout"""
+        layout = Layout()
+
+        layout.split_column(
+            Layout(name="header", size=3),  # Back to v0.91 size
+            Layout(name="main", ratio=1),
+        )
+
+        layout["main"].split_row(
+            Layout(name="left", ratio=40),
+            Layout(name="right", ratio=27),  # 0.5 wider than 13 (was 13, now 27/40 ≈ 1.35x)
+        )
+
+        layout["left"].split_column(
+            Layout(name="progress", size=6),
+            Layout(name="logs", ratio=1),
+        )
+
+        layout["right"].split_column(
+            Layout(name="status", size=15),  # Increased by 1
+            Layout(name="models", size=10),  # Taller for 4 models + Entities column
+            Layout(name="system", size=5),   # Increased by 1
+            Layout(name="info", size=5),
+        )
+
+        # Header
+        header = Text()
+        header.append(" KB INGEST DASHBOARD ", style="bold white on blue")
+        header.append(f" {datetime.now().strftime('%H:%M:%S')} ", style="dim")
+        layout["header"].update(Panel(header, style="bold white on blue", box=box.ROUNDED, padding=(0, 3)))
+
+        # Panels
+        layout["progress"].update(self._build_progress_panel())
+        layout["logs"].update(self._build_log_panel())
+        layout["status"].update(self._build_status_panel())
+        layout["models"].update(self._build_model_panel())
+        layout["system"].update(self._build_system_panel())
+        layout["info"].update(self._build_info_panel())
+
+        return layout
+
+    def run(self):
+        """Run the dashboard"""
+        self.console.clear()
+        self.console.print("[bold cyan]KB Ingest Dashboard[/bold cyan] - Starting...")
+        self.console.print("[dim]Press Ctrl+C to quit[/dim]")
+
+        try:
+            with Live(self._build_layout(), console=self.console, refresh_per_second=2) as live:
+                while True:
+                    self._update_stats()
+                    live.update(self._build_layout())
+                    time.sleep(0.5)
+        except KeyboardInterrupt:
+            self.console.print("\n[yellow]Dashboard stopped.[/yellow]")
+
+
+def main():
+    """Main entry point"""
+    # Support both --hide-logs and --no-logs
+    show_logs = "--hide-logs" not in sys.argv and "--no-logs" not in sys.argv
+    dashboard = KBIngestDashboard(show_logs=show_logs)
+    dashboard.run()
+
+
+if __name__ == "__main__":
+    main()
