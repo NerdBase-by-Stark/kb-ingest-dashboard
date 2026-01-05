@@ -1,4 +1,4 @@
-# KB Ingest Dashboard v1.0
+# Knowledge Base Ingest Dashboard v1.0
 
 > A real-time terminal dashboard for monitoring knowledge base ingestion progress
 
