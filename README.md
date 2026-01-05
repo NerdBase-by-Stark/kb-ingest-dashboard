@@ -24,7 +24,7 @@ The KB Ingest Dashboard provides **live, session-aware monitoring** of document 
 pip install rich psutil
 
 # Download the script
-curl -o ~/.local/bin/kb-ingest-dashboard https://raw.githubusercontent.com/your-repo/kb-ingest-dashboard/v1.0/kb-ingest-dashboard
+curl -o ~/.local/bin/kb-ingest-dashboard https://raw.githubusercontent.com/NerdBase-by-Stark/kb-ingest-dashboard/v1.0/kb-ingest-dashboard
 chmod +x ~/.local/bin/kb-ingest-dashboard
 
 # Run the dashboard
