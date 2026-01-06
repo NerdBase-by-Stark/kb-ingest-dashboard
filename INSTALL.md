@@ -21,10 +21,10 @@ The simplest way to install:
 
 ```bash
 # Download to ~/.local/bin/
-curl -o ~/.local/bin/kb-ingest-dashboard https://raw.githubusercontent.com/your-repo/kb-ingest-dashboard/main/kb-ingest-dashboard
+curl -o ~/.local/bin/kb-ingest-dashboard https://raw.githubusercontent.com/NerdBase-by-Stark/kb-ingest-dashboard/main/kb-ingest-dashboard
 
 # Or using wget
-wget -O ~/.local/bin/kb-ingest-dashboard https://raw.githubusercontent.com/your-repo/kb-ingest-dashboard/main/kb-ingest-dashboard
+wget -O ~/.local/bin/kb-ingest-dashboard https://raw.githubusercontent.com/NerdBase-by-Stark/kb-ingest-dashboard/main/kb-ingest-dashboard
 
 # Make executable
 chmod +x ~/.local/bin/kb-ingest-dashboard
@@ -37,7 +37,7 @@ kb-ingest-dashboard --help
 
 ```bash
 # Clone repository
-git clone https://github.com/your-repo/kb-ingest-dashboard.git
+git clone https://github.com/NerdBase-by-Stark/kb-ingest-dashboard.git
 cd kb-ingest-dashboard
 
 # Copy to your bin directory
@@ -50,7 +50,7 @@ kb-ingest-dashboard --version
 
 ### Method 3: Manual Download
 
-1. Download the script from [GitHub Releases](https://github.com/your-repo/kb-ingest-dashboard/releases)
+1. Download the script from [GitHub Releases](https://github.com/NerdBase-by-Stark/kb-ingest-dashboard/releases)
 2. Save to `~/.local/bin/kb-ingest-dashboard`
 3. Make it executable:
 
@@ -293,7 +293,7 @@ pip uninstall rich psutil
 cp ~/.local/bin/kb-ingest-dashboard ~/.local/bin/kb-ingest-dashboard.backup
 
 # Download new version
-curl -o ~/.local/bin/kb-ingest-dashboard https://raw.githubusercontent.com/your-repo/kb-ingest-dashboard/main/kb-ingest-dashboard
+curl -o ~/.local/bin/kb-ingest-dashboard https://raw.githubusercontent.com/NerdBase-by-Stark/kb-ingest-dashboard/main/kb-ingest-dashboard
 
 # Make executable
 chmod +x ~/.local/bin/kb-ingest-dashboard
@@ -310,7 +310,7 @@ After installation:
 
 ---
 
-Still having issues? Please [open an issue](https://github.com/your-repo/kb-ingest-dashboard/issues) with:
+Still having issues? Please [open an issue](https://github.com/NerdBase-by-Stark/kb-ingest-dashboard/issues) with:
 - Your OS and Python version
 - The exact error message
 - Steps to reproduce the problem
